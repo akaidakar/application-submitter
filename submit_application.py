@@ -1,7 +1,7 @@
 """Submit a signed application to B12.
 
-The body is serialized exactly once. Those same bytes are both signed and sent,
-so the signature cannot drift from the payload.
+canonicalize() serializes the body exactly once. The script signs and sends
+those same bytes, so the signature cannot drift from the payload.
 """
 
 from __future__ import annotations
@@ -23,11 +23,13 @@ SECRET_ENV_VAR = "B12_SIGNING_SECRET"
 REQUEST_TIMEOUT_SECONDS = 30
 
 EXIT_SUBMISSION_FAILED = 1
+# argparse also exits with 2 on a bad command line, so a missing flag and a
+# missing environment variable report the same code. Tests rely on that.
 EXIT_MISCONFIGURED = 2
 
 # A transport takes a prepared request and returns (status_code, body_bytes).
 # Injecting it keeps the tests off the network.
-Transport = Callable[[urllib.request.Request], "tuple[int, bytes]"]
+Transport = Callable[[urllib.request.Request], tuple[int, bytes]]
 
 
 class ConfigurationError(RuntimeError):
@@ -48,8 +50,12 @@ class Applicant:
 
 
 def _nonblank(label: str, value: str | None) -> str:
+    return _stripped(value, f"{label} is required and cannot be blank.")
+
+
+def _stripped(value: str | None, message: str) -> str:
     if value is None or not value.strip():
-        raise ConfigurationError(f"{label} is required and cannot be blank.")
+        raise ConfigurationError(message)
     return value.strip()
 
 
@@ -79,10 +85,7 @@ def utc_timestamp(now: datetime | None = None) -> str:
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
-    value = env.get(name)
-    if not value or not value.strip():
-        raise ConfigurationError(f"{name} is not set. Set it before submitting.")
-    return value.strip()
+    return _stripped(env.get(name), f"{name} is not set. Set it before submitting.")
 
 
 def repository_link(env: Mapping[str, str]) -> str:
@@ -114,7 +117,7 @@ def urllib_transport(request: urllib.request.Request) -> tuple[int, bytes]:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
-        # An HTTP error is still a response: the server received the request.
+        # An HTTP error is still a response, so the server received the request.
         # Returning it rather than raising keeps that distinct from URLError,
         # where the request may never have arrived at all.
         return error.code, error.read()

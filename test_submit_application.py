@@ -36,9 +36,9 @@ B12_EXAMPLE_CANONICAL = (
 B12_EXAMPLE_DIGEST = "c5db257a56e3c258ec1162459c9a295280871269f4cf70146d2c9f1b52671d45"
 
 # The exercise publishes a worked example: the payload above, a signing key,
-# and the digest they produce. The key is treated as a secret and never written
-# down here, so the digest test reads it from the same environment variable the
-# submission uses and skips when it is absent. CI provides it from the
+# and the digest they produce. The exercise treats the key as a secret, so it
+# never appears here. The digest test reads it from the same environment
+# variable the submission uses and skips when it is absent. CI provides it from the
 # repository secret; locally, export B12_SIGNING_SECRET to run that one test.
 PUBLISHED_EXAMPLE_KEY = os.environ.get(app.SECRET_ENV_VAR)
 
@@ -58,7 +58,7 @@ APPLICANT_ARGS = [
     "--email", "applicant@example.com",
     "--resume-link", "https://resume.example.com/applicant.pdf",
 ]
-APPLICANT = app.Applicant("Some Applicant", "applicant@example.com", "https://resume.example.com/applicant.pdf")
+APPLICANT = app.Applicant(*APPLICANT_ARGS[1::2])
 
 
 class RecordingTransport:
@@ -72,6 +72,18 @@ class RecordingTransport:
     def __call__(self, request):
         self.request = request
         return self.status, self.body
+
+
+class RaisingTransport:
+    """Stands in for a network that never answers, and counts the attempts."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+        self.attempts = 0
+
+    def __call__(self, request):
+        self.attempts += 1
+        raise self.error
 
 
 def test_canonicalization_matches_b12s_published_example():
@@ -130,8 +142,8 @@ def test_timestamp_is_iso8601_with_milliseconds(moment, expected):
 def test_timestamp_converts_other_offsets_to_utc():
     from datetime import timedelta
 
-    noon_in_bishkek = datetime(2026, 1, 6, 22, 59, 37, 571000, tzinfo=timezone(timedelta(hours=6)))
-    assert app.utc_timestamp(noon_in_bishkek) == "2026-01-06T16:59:37.571Z"
+    evening_in_bishkek = datetime(2026, 1, 6, 22, 59, 37, 571000, tzinfo=timezone(timedelta(hours=6)))
+    assert app.utc_timestamp(evening_in_bishkek) == "2026-01-06T16:59:37.571Z"
 
 
 def test_links_are_derived_from_the_running_job():
@@ -164,14 +176,9 @@ def test_non_200_response_fails_the_run(capsys):
 
 
 def test_unreachable_endpoint_fails_without_retrying(capsys):
-    attempts = []
-
-    def refusing_transport(request):
-        attempts.append(request)
-        raise urllib.error.URLError("connection refused")
-
-    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=refusing_transport) == app.EXIT_SUBMISSION_FAILED
-    assert len(attempts) == 1
+    transport = RaisingTransport(urllib.error.URLError("connection refused"))
+    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
+    assert transport.attempts == 1
     assert "connection refused" in capsys.readouterr().err
 
 
@@ -239,14 +246,9 @@ def test_invalid_response_fails_cleanly(body, capsys):
 
 
 def test_timeout_fails_without_retrying(capsys):
-    attempts = []
-
-    def timed_out(request):
-        attempts.append(request)
-        raise TimeoutError("read timed out")
-
-    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=timed_out) == app.EXIT_SUBMISSION_FAILED
-    assert len(attempts) == 1
+    transport = RaisingTransport(TimeoutError("read timed out"))
+    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
+    assert transport.attempts == 1
     assert "read timed out" in capsys.readouterr().err
 
 

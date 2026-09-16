@@ -3,18 +3,20 @@ name: submit application
 on:
   workflow_dispatch:
     inputs:
+      # No defaults: a fork inherits them, and a forker who left them alone
+      # would submit someone else's details.
       name:
         description: "Applicant's full name"
         type: string
-        default: "Aidar Kamalov"
+        required: true
       email:
         description: "Applicant's email address"
         type: string
-        default: "akaudakar@gmail.com"
+        required: true
       resume_link:
         description: "Public URL of a résumé or LinkedIn profile"
         type: string
-        default: "https://drive.google.com/file/d/1xdTga5mvfdo3Kdgq77BJFFA_stKmQ5tB/view?usp=sharing"
+        required: true
       dry_run:
         description: "Print the signed body without posting it"
         type: boolean
@@ -36,6 +38,8 @@ jobs:
       - name: Submit
         # Inputs go through env rather than straight into the command line so
         # a quote or a shell character typed into the form cannot break out.
+        # dry_run is the exception: it is a boolean, so the expression below
+        # can only ever expand to "--dry-run" or nothing.
         env:
           B12_SIGNING_SECRET: ${{ secrets.B12_SIGNING_SECRET }}
           APPLICANT_NAME: ${{ inputs.name }}
