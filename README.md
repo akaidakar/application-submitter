@@ -35,7 +35,9 @@ python3 -m pip install pytest
 python3 -m pytest -q
 ```
 
-The tests use no network and need no environment setup.
+The tests use no network. One test signs B12's example payload with the real
+key and compares against their published digest; it skips unless
+`B12_SIGNING_SECRET` is exported.
 
 ## Decisions
 
@@ -48,10 +50,11 @@ the prepared request's own `.data` and checks it against the header.
 
 **B12's worked example is the first test.** The exercise publishes a payload, a
 signing key, and the digest they produce, so signing is checked against their
-spec rather than against this implementation's own output. All three values are
-inline in the test file, because a published example is documentation and only
-works with all of its parts. The submission path is separate: it reads its key
-from the environment and has no fallback, so nothing can sign with a default.
+spec rather than against this implementation's own output. The payload and the
+digest are in the test file. The key is not: the exercise asks for it to be
+treated as a secret, so the test reads it from `B12_SIGNING_SECRET` and skips
+when that is unset. CI passes the repository secret to the test job, and the
+submission path reads the same variable with no fallback.
 
 **`ensure_ascii=False`.** The example payload is pure ASCII, so it produces the
 same bytes whether non-ASCII is escaped to `\uXXXX` or written as literal UTF-8.

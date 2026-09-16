@@ -21,10 +21,9 @@ on:
         default: true
 
 jobs:
-  # The tests need no secret: they verify signing against the worked example
-  # published in the exercise, not against the live submission.
   tests:
     uses: ./.github/workflows/tests.yml
+    secrets: inherit
 
   submit:
     needs: tests

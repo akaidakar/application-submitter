@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import urllib.error
 from datetime import datetime, timezone
@@ -34,11 +35,12 @@ B12_EXAMPLE_CANONICAL = (
 )
 B12_EXAMPLE_DIGEST = "c5db257a56e3c258ec1162459c9a295280871269f4cf70146d2c9f1b52671d45"
 
-# The exercise publishes a complete worked example: the payload above, the key
-# below, and the digest it produces. All three are fixtures from a public
-# document, which is why the key is inline here. The submission path reads its
-# key from the environment with no fallback; see submit_application.py.
-PUBLISHED_EXAMPLE_KEY = "REDACTED"
+# The exercise publishes a worked example: the payload above, a signing key,
+# and the digest they produce. The key is treated as a secret and never written
+# down here, so the digest test reads it from the same environment variable the
+# submission uses and skips when it is absent. CI provides it from the
+# repository secret; locally, export B12_SIGNING_SECRET to run that one test.
+PUBLISHED_EXAMPLE_KEY = os.environ.get(app.SECRET_ENV_VAR)
 
 # Every other test signs with a different key, so none of them can pass by
 # accidentally depending on the published one.
@@ -77,6 +79,9 @@ def test_canonicalization_matches_b12s_published_example():
     assert body == B12_EXAMPLE_CANONICAL.encode("utf-8")
 
 
+@pytest.mark.skipif(
+    not PUBLISHED_EXAMPLE_KEY, reason=f"{app.SECRET_ENV_VAR} is not set"
+)
 def test_signature_matches_b12s_published_digest():
     """Check this implementation against B12's spec rather than against itself."""
     body = app.canonicalize(B12_EXAMPLE_PAYLOAD)

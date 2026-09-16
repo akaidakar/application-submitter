@@ -17,4 +17,8 @@ jobs:
       - name: Install test dependencies
         run: pip install pytest
       - name: Run tests
+        # The published-digest test signs with the real key. Without the secret
+        # that one test is skipped and the rest still run.
+        env:
+          B12_SIGNING_SECRET: ${{ secrets.B12_SIGNING_SECRET }}
         run: pytest -v
