@@ -2,6 +2,8 @@
 
 Sends a signed application to B12 through GitHub Actions and prints the receipt.
 
+![Dispatching the workflow as a dry run and reading the signed body in the job log](docs/demo.gif)
+
 ## Setup
 
 Only collaborators can dispatch a workflow, so to run it yourself, fork the
