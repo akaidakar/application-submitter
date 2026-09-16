@@ -9,14 +9,16 @@ Sends a signed application to B12 through GitHub Actions and prints the receipt.
 Only collaborators can dispatch a workflow, so to run it yourself, fork the
 repository first. The submission then links to your fork and your run.
 
-1. Under Settings, then Secrets and variables, then Actions, add a secret
+1. Open the Actions tab of the fork and enable workflows. GitHub disables them
+   on a fresh fork until you do.
+2. Under Settings, then Secrets and variables, then Actions, add a secret
    named `B12_SIGNING_SECRET` with the value from the exercise.
-2. Open Actions, then submit application, then Run workflow. The form asks for
-   a name, an email, and a public résumé or LinkedIn URL. None are prefilled,
-   so a fork never submits the original owner's details by accident. Keep
-   "dry run" checked to print the exact body and signature without posting;
-   uncheck it to submit.
-3. Send B12 the receipt from the job log or the run summary.
+3. Under Actions, choose submit application, then Run workflow. The form asks
+   for a name, an email, and a public résumé or LinkedIn URL. None are
+   prefilled, so a fork never submits the original owner's details by
+   accident. Keep "dry run" checked to print the exact body and signature
+   without posting; uncheck it to submit.
+4. Send B12 the receipt from the job log or the run summary.
 
 The script can also run outside Actions for a dry run:
 
@@ -26,6 +28,9 @@ GITHUB_REPOSITORY=you/repo GITHUB_RUN_ID=1 \
 python3 submit_application.py --name "Your Name" --email you@example.com \
   --resume-link https://example.com/resume.pdf --dry-run
 ```
+
+It exits 0 after a submission or a dry run, 1 when the submission failed, and
+2 when a flag or environment variable is missing or blank.
 
 ## Tests
 
@@ -38,70 +43,30 @@ python3 -m pytest -q
 
 The tests use no network. One test signs B12's example payload with the real
 key and compares against their published digest; it skips unless
-`B12_SIGNING_SECRET` is exported.
+`B12_SIGNING_SECRET` is exported. CI passes the repository secret to that job.
 
 ## Decisions
 
-**`canonicalize()` serializes the body once.** It returns bytes, and the script
-signs and sends those same bytes. The usual way to break an HMAC
-signature is to build a dict, sign one serialization of it, and let the HTTP
-client produce a different one for the wire. `urllib.request.Request` takes
-bytes directly, so that cannot happen here. One test recomputes the HMAC from
-the prepared request's own `.data` and checks it against the header.
+The script signs the bytes it sends. `canonicalize()` returns bytes, and the
+same object goes to both `sign()` and the request. Building a dict, signing one
+serialization, and letting the HTTP client produce another is the usual way to
+break an HMAC, and `urllib.request.Request` takes bytes directly, so it cannot
+happen here. One test recomputes the HMAC from the prepared request's own
+`.data` and checks it against the header.
 
-**B12's worked example is the first test.** The exercise publishes a payload, a
-signing key, and the digest they produce, so the tests check signing against
-their spec rather than against this implementation's own output. The payload
-and the digest are in the test file. The key is not. The exercise asks for it
-to be treated as a secret, so the test reads it from `B12_SIGNING_SECRET` and
-skips when that is unset. CI passes the repository secret to the test job, and the
-submission path reads the same variable with no fallback.
+Name, email and résumé link are workflow inputs, so the same script submits for
+anyone. `repository_link` and `action_run_link` come from `GITHUB_SERVER_URL`,
+`GITHUB_REPOSITORY` and `GITHUB_RUN_ID` because they describe the run itself.
+If any are missing the script exits before posting rather than sending a link
+it guessed at. The key stays in the environment because it is a secret. Inputs
+reach the script through environment variables, so a quote typed into the form
+cannot break the command line.
 
-**`ensure_ascii=False`.** The example payload is pure ASCII, so it produces the
-same bytes whether non-ASCII is escaped to `\uXXXX` or written as literal UTF-8.
-The published digest cannot distinguish the two. "UTF-8-encoded" reads as the
-literal form, so that is the setting here, and a test with a Cyrillic name pins
-it.
+The POST only runs from a `workflow_dispatch` that defaults to a dry run. The
+endpoint belongs to someone else, and a submission should not go out on every
+commit.
 
-**The applicant is an argument. The run is the environment.** Name, email and
-résumé link are command-line flags, exposed as workflow inputs, so the same
-script submits for anyone without an edit. `repository_link` and
-`action_run_link` come from `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY` and
-`GITHUB_RUN_ID` instead, because they describe the run itself and typing them
-in would only add a way to get them wrong. If any are missing the script exits before
-posting rather than sending a link it guessed at. The signing key stays in the
-environment because it is a secret, and secrets do not belong on a command line
-that ends up in a log.
-
-**Inputs reach the script through environment variables.** The workflow puts
-each dispatch input in an env var and quotes it on the command line, so a
-quote or shell character typed into the form cannot break the command.
-
-**Submitting is manual.** Tests run on every push, but the POST only runs from a
-`workflow_dispatch` that defaults to a dry run. The endpoint belongs to someone
-else, and a submission should not go out on every commit.
-
-**The script does not retry failures.** Without an idempotency key, a lost response and a
+The script does not retry. Without an idempotency key, a lost response and a
 lost request look identical from the client, so a retry could file a second
-application. The script exits non-zero with the status, the response body, and
-the request body it sent, which is enough to diagnose the failure from the log
-and re-run by hand.
-
-**Timestamps are explicit.** `isoformat(timespec="milliseconds")` with the
-offset replaced by `Z` matches the shape of the example. A bare `isoformat()`
-would give microseconds and `+00:00`.
-
-## Layout
-
-| File | Purpose |
-| --- | --- |
-| `submit_application.py` | Canonicalize, sign, post, report |
-| `test_submit_application.py` | Tests, no network |
-| `.github/workflows/tests.yml` | Tests on every push, reusable by the submit workflow |
-| `.github/workflows/submit.yml` | Manual submission, runs the tests first |
-
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Submitted, or dry run completed |
-| `1` | Submission failed |
-| `2` | Misconfigured, including a missing or blank flag |
+application. On failure it prints the status, the response, and the body it
+sent, which is enough to diagnose from the log and re-run by hand.
