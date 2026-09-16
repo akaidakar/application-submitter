@@ -169,12 +169,6 @@ def test_dry_run_posts_nothing_and_hides_the_secret(capsys):
     assert TEST_SECRET not in stdout
 
 
-def test_successful_submission_prints_the_receipt(capsys):
-    transport = FakeTransport(body=b'{"success": true, "receipt": "abc-789"}')
-    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == 0
-    assert "abc-789" in capsys.readouterr().out
-
-
 def test_non_200_response_fails_the_run(capsys):
     transport = FakeTransport(status=403, body=b'{"error": "bad signature"}')
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
@@ -185,6 +179,7 @@ def test_non_200_response_fails_the_run(capsys):
 
 @pytest.mark.parametrize("body", [
     b"not json",
+    b"\xff",
     b"[]",
     b'{"success": false, "receipt": "r-123"}',
     b'{"success": true, "receipt": ""}',
@@ -205,10 +200,12 @@ def test_no_response_fails_without_retrying(error, capsys):
     transport = FakeTransport(error=error)
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
     assert len(transport.requests) == 1
-    assert str(error) in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert app.SUBMISSION_URL in stderr
+    assert str(error) in stderr
 
 
-def test_receipt_is_written_to_the_step_summary_only_on_success(tmp_path):
+def test_receipt_is_printed_and_written_to_the_step_summary_only_on_success(tmp_path, capsys):
     summary = tmp_path / "summary.md"
     env = {**CI_ENV, "GITHUB_STEP_SUMMARY": str(summary)}
 
@@ -218,4 +215,5 @@ def test_receipt_is_written_to_the_step_summary_only_on_success(tmp_path):
 
     success = FakeTransport(body=b'{"success": true, "receipt": "abc-789"}')
     assert app.main(APPLICANT_ARGS, env=env, transport=success) == 0
+    assert "abc-789" in capsys.readouterr().out
     assert "abc-789" in summary.read_text(encoding="utf-8")

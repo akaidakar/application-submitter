@@ -64,23 +64,20 @@ def utc_timestamp(now: datetime | None = None) -> str:
 
 
 def build_payload(
-    name: str,
-    email: str,
-    resume_link: str,
-    env: Mapping[str, str],
-    now: datetime | None = None,
+    name: str, email: str, resume_link: str, env: Mapping[str, str]
 ) -> dict[str, str]:
     """The applicant comes from the caller; the links come from the running job."""
     server = required_env(env, "GITHUB_SERVER_URL")
     repository = required_env(env, "GITHUB_REPOSITORY")
     run_id = required_env(env, "GITHUB_RUN_ID")
+    repository_link = f"{server}/{repository}"
     return {
-        "timestamp": utc_timestamp(now),
+        "timestamp": utc_timestamp(),
         "name": name,
         "email": email,
         "resume_link": resume_link,
-        "repository_link": f"{server}/{repository}",
-        "action_run_link": f"{server}/{repository}/actions/runs/{run_id}",
+        "repository_link": repository_link,
+        "action_run_link": f"{repository_link}/actions/runs/{run_id}",
     }
 
 
@@ -163,21 +160,24 @@ def main(
 
     try:
         receipt = read_receipt(*transport(build_request(body, signature)))
-    except (urllib.error.URLError, TimeoutError, ValueError) as error:
-        # On a URLError or timeout there was no HTTP response, so a lost
-        # request and a lost reply look identical from here. The endpoint
-        # offers no idempotency key, so retrying could file a second
-        # application. Re-run the workflow by hand instead.
-        print(f"error: {error}", file=sys.stderr)
-        print(f"body was:  {body.decode('utf-8')}", file=sys.stderr)
-        print(f"signature: {signature}", file=sys.stderr)
-        return EXIT_SUBMISSION_FAILED
+    except (urllib.error.URLError, TimeoutError) as error:
+        # No HTTP response, so a lost request and a lost reply look identical
+        # from here. The endpoint offers no idempotency key, so retrying could
+        # file a second application. Re-run the workflow by hand instead.
+        failure = f"could not reach {SUBMISSION_URL}: {error}"
+    except ValueError as error:
+        failure = str(error)
+    else:
+        print(f"Submission receipt: {receipt}")
+        if env.get("GITHUB_STEP_SUMMARY"):
+            with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write(f"Submission receipt: `{receipt}`\n")
+        return 0
 
-    print(f"Submission receipt: {receipt}")
-    if env.get("GITHUB_STEP_SUMMARY"):
-        with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-            summary.write(f"Submission receipt: `{receipt}`\n")
-    return 0
+    print(f"error: {failure}", file=sys.stderr)
+    print(f"body was:  {body.decode('utf-8')}", file=sys.stderr)
+    print(f"signature: {signature}", file=sys.stderr)
+    return EXIT_SUBMISSION_FAILED
 
 
 if __name__ == "__main__":
