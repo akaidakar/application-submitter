@@ -1,5 +1,3 @@
-# Submitting is manual on purpose. The endpoint belongs to someone else and the
-# POST is not idempotent, so it is not something to fire on every push.
 name: submit application
 
 on:
@@ -11,6 +9,8 @@ on:
         default: true
 
 jobs:
+  # The tests need no secret: they verify signing against the worked example
+  # published in the exercise, not against the live submission.
   tests:
     uses: ./.github/workflows/tests.yml
 
@@ -25,4 +25,5 @@ jobs:
       - name: Submit
         env:
           B12_SIGNING_SECRET: ${{ secrets.B12_SIGNING_SECRET }}
+          RESUME_LINK: ${{ vars.RESUME_LINK }}
         run: python submit_application.py ${{ inputs.dry_run && '--dry-run' || '' }}
