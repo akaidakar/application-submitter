@@ -22,9 +22,6 @@ SIGNATURE_HEADER = "X-Signature-256"
 SECRET_ENV_VAR = "B12_SIGNING_SECRET"
 REQUEST_TIMEOUT_SECONDS = 30
 
-NAME = "Aidar Kamalov"
-EMAIL = "akaudakar@gmail.com"
-
 EXIT_SUBMISSION_FAILED = 1
 EXIT_MISCONFIGURED = 2
 
@@ -34,7 +31,26 @@ Transport = Callable[[urllib.request.Request], "tuple[int, bytes]"]
 
 
 class ConfigurationError(RuntimeError):
-    """Something the environment must supply is missing or unusable."""
+    """Something the caller must supply is missing or unusable."""
+
+
+class Applicant:
+    """The three fields that describe who is applying.
+
+    They arrive as command-line arguments so the workflow can show them as
+    dispatch inputs and anyone can run the same script with their own details.
+    """
+
+    def __init__(self, name: str, email: str, resume_link: str):
+        self.name = _nonblank("--name", name)
+        self.email = _nonblank("--email", email)
+        self.resume_link = _nonblank("--resume-link", resume_link)
+
+
+def _nonblank(label: str, value: str | None) -> str:
+    if value is None or not value.strip():
+        raise ConfigurationError(f"{label} is required and cannot be blank.")
+    return value.strip()
 
 
 def canonicalize(payload: Mapping[str, Any]) -> bytes:
@@ -80,12 +96,14 @@ def action_run_link(env: Mapping[str, str]) -> str:
     return f"{repository_link(env)}/actions/runs/{run_id}"
 
 
-def build_payload(env: Mapping[str, str], now: datetime | None = None) -> dict[str, str]:
+def build_payload(
+    applicant: Applicant, env: Mapping[str, str], now: datetime | None = None
+) -> dict[str, str]:
     return {
         "timestamp": utc_timestamp(now),
-        "name": NAME,
-        "email": EMAIL,
-        "resume_link": _required(env, "RESUME_LINK"),
+        "name": applicant.name,
+        "email": applicant.email,
+        "resume_link": applicant.resume_link,
         "repository_link": repository_link(env),
         "action_run_link": action_run_link(env),
     }
@@ -138,6 +156,11 @@ def main(
     transport: Transport = urllib_transport,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--name", required=True, help="Applicant's full name.")
+    parser.add_argument("--email", required=True, help="Applicant's email address.")
+    parser.add_argument(
+        "--resume-link", required=True, help="Public URL of a résumé or LinkedIn profile."
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -146,8 +169,9 @@ def main(
     args = parser.parse_args(argv)
 
     try:
+        applicant = Applicant(args.name, args.email, args.resume_link)
         secret = _required(env, SECRET_ENV_VAR)
-        payload = build_payload(env)
+        payload = build_payload(applicant, env)
     except ConfigurationError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_MISCONFIGURED

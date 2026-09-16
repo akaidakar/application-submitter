@@ -3,6 +3,18 @@ name: submit application
 on:
   workflow_dispatch:
     inputs:
+      name:
+        description: "Applicant's full name"
+        type: string
+        default: "Aidar Kamalov"
+      email:
+        description: "Applicant's email address"
+        type: string
+        default: "akaudakar@gmail.com"
+      resume_link:
+        description: "Public URL of a résumé or LinkedIn profile"
+        type: string
+        default: "https://drive.google.com/file/d/1xdTga5mvfdo3Kdgq77BJFFA_stKmQ5tB/view?usp=sharing"
       dry_run:
         description: "Print the signed body without posting it"
         type: boolean
@@ -23,7 +35,16 @@ jobs:
         with:
           python-version: "3.12"
       - name: Submit
+        # Inputs go through env rather than straight into the command line so
+        # a quote or a shell character typed into the form cannot break out.
         env:
           B12_SIGNING_SECRET: ${{ secrets.B12_SIGNING_SECRET }}
-          RESUME_LINK: ${{ vars.RESUME_LINK }}
-        run: python submit_application.py ${{ inputs.dry_run && '--dry-run' || '' }}
+          APPLICANT_NAME: ${{ inputs.name }}
+          APPLICANT_EMAIL: ${{ inputs.email }}
+          APPLICANT_RESUME_LINK: ${{ inputs.resume_link }}
+        run: >
+          python submit_application.py
+          --name "$APPLICANT_NAME"
+          --email "$APPLICANT_EMAIL"
+          --resume-link "$APPLICANT_RESUME_LINK"
+          ${{ inputs.dry_run && '--dry-run' || '' }}

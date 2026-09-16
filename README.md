@@ -4,13 +4,22 @@ Sends a signed application to B12 through GitHub Actions and prints the receipt.
 
 ## Setup
 
-1. Check `NAME` and `EMAIL` in `submit_application.py`.
-2. Under Settings → Secrets and variables → Actions, add:
-   - Secret `B12_SIGNING_SECRET`: the value from the exercise.
-   - Variable `RESUME_LINK`: a public résumé or LinkedIn URL.
-3. Open Actions → submit application → Run workflow. Keep "dry run" checked to
-   print the exact body and signature without posting; uncheck it to submit.
-4. Send B12 the receipt from the job log or the run summary.
+1. Under Settings → Secrets and variables → Actions, add a secret named
+   `B12_SIGNING_SECRET` with the value from the exercise.
+2. Open Actions → submit application → Run workflow. The form asks for a name,
+   an email, and a public résumé or LinkedIn URL, prefilled with the repository
+   owner's details. Keep "dry run" checked to print the exact body and
+   signature without posting; uncheck it to submit.
+3. Send B12 the receipt from the job log or the run summary.
+
+The script can also run outside Actions for a dry run:
+
+```sh
+B12_SIGNING_SECRET=... GITHUB_SERVER_URL=https://github.com \
+GITHUB_REPOSITORY=you/repo GITHUB_RUN_ID=1 \
+python3 submit_application.py --name "Your Name" --email you@example.com \
+  --resume-link https://example.com/resume.pdf --dry-run
+```
 
 ## Tests
 
@@ -45,10 +54,19 @@ The published digest cannot distinguish the two. "UTF-8-encoded" reads as the
 literal form, so that is the setting here, and a test with a Cyrillic name pins
 it.
 
-**Links are derived, not pasted.** `repository_link` and `action_run_link` come
-from `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY` and `GITHUB_RUN_ID` at run time,
-so the payload always points at the run that posted it. If any are missing the
-script exits before posting rather than sending a link it guessed at.
+**Who is applying is an argument. Where it runs is the environment.** Name,
+email and résumé link are command-line flags, exposed as workflow inputs, so
+the same script submits for anyone without an edit. `repository_link` and
+`action_run_link` come from `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY` and
+`GITHUB_RUN_ID` instead, because they describe the run itself and typing them
+in would only let them be wrong. If any are missing the script exits before
+posting rather than sending a link it guessed at. The signing key stays in the
+environment because it is a secret, and secrets do not belong on a command line
+that ends up in a log.
+
+**Inputs reach the script through environment variables.** The workflow puts
+each dispatch input in an env var and quotes it on the command line, so a
+quote or shell character typed into the form cannot break the command.
 
 **Submitting is manual.** Tests run on every push, but the POST only runs from a
 `workflow_dispatch` that defaults to a dry run. The endpoint belongs to someone
