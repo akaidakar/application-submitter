@@ -4,6 +4,9 @@ Sends a signed application to B12 through GitHub Actions and prints the receipt.
 
 ## Setup
 
+Only collaborators can dispatch a workflow, so to run it yourself, fork the
+repository first. The submission then links to your fork and your run.
+
 1. Under Settings → Secrets and variables → Actions, add a secret named
    `B12_SIGNING_SECRET` with the value from the exercise.
 2. Open Actions → submit application → Run workflow. The form asks for a name,
