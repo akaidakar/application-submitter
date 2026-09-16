@@ -1,9 +1,4 @@
-"""Tests for the application submitter.
-
-The first test is the important one: it checks our serialization and signing
-against the worked example B12 published, so the implementation is verified
-against their spec rather than against itself.
-"""
+"""Network-free tests for payload signing and submission handling."""
 
 from __future__ import annotations
 
@@ -38,20 +33,24 @@ B12_EXAMPLE_CANONICAL = (
     '"timestamp":"2026-01-06T16:59:37.571Z"}'
 )
 B12_EXAMPLE_DIGEST = "c5db257a56e3c258ec1162459c9a295280871269f4cf70146d2c9f1b52671d45"
-B12_SECRET = "REDACTED"
+
+# The exercise publishes a complete worked example: the payload above, the key
+# below, and the digest it produces. All three are fixtures from a public
+# document, which is why the key is inline here. The submission path reads its
+# key from the environment with no fallback; see submit_application.py.
+PUBLISHED_EXAMPLE_KEY = "REDACTED"
+
+# Every other test signs with a different key, so none of them can pass by
+# accidentally depending on the published one.
+TEST_SECRET = "test-signing-key"
 
 CI_ENV = {
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_REPOSITORY": "someone/some-repo",
     "GITHUB_RUN_ID": "20561457327",
-    app.SECRET_ENV_VAR: B12_SECRET,
+    app.SECRET_ENV_VAR: TEST_SECRET,
+    "RESUME_LINK": "https://resume.example.com/aidar.pdf",
 }
-
-
-@pytest.fixture(autouse=True)
-def resume_link(monkeypatch):
-    """Pin the resume link so tests do not depend on the real one."""
-    monkeypatch.setattr(app, "RESUME_LINK", "https://resume.example.com/aidar.pdf")
 
 
 class RecordingTransport:
@@ -67,38 +66,36 @@ class RecordingTransport:
         return self.status, self.body
 
 
-def test_matches_b12s_published_example():
-    """Canonicalization and signing reproduce B12's worked example exactly."""
+def test_canonicalization_matches_b12s_published_example():
     body = app.canonicalize(B12_EXAMPLE_PAYLOAD)
     assert body == B12_EXAMPLE_CANONICAL.encode("utf-8")
-    assert app.sign(body, B12_SECRET) == f"sha256={B12_EXAMPLE_DIGEST}"
+
+
+def test_signature_matches_b12s_published_digest():
+    """Check this implementation against B12's spec rather than against itself."""
+    body = app.canonicalize(B12_EXAMPLE_PAYLOAD)
+    assert app.sign(body, PUBLISHED_EXAMPLE_KEY) == f"sha256={B12_EXAMPLE_DIGEST}"
 
 
 def test_signature_covers_the_bytes_actually_sent():
-    """The header must sign the request's own body, not a re-serialization.
-
-    This is the bug the whole design guards against: build a payload, hand it to
-    an HTTP client that serializes it again, and the signature silently stops
-    matching the body. Verifying the header against request.data closes that gap.
-    """
     transport = RecordingTransport()
-    app.submit(B12_EXAMPLE_PAYLOAD, B12_SECRET, transport=transport)
+    assert app.main([], env=CI_ENV, transport=transport) == 0
 
     sent = transport.request.data
     header = transport.request.get_header(app.SIGNATURE_HEADER.capitalize())
-    recomputed = hmac.new(B12_SECRET.encode("utf-8"), sent, hashlib.sha256).hexdigest()
+    recomputed = hmac.new(TEST_SECRET.encode("utf-8"), sent, hashlib.sha256).hexdigest()
 
     assert header == f"sha256={recomputed}"
-    assert json.loads(sent) == B12_EXAMPLE_PAYLOAD
+    payload = json.loads(sent)
+    assert payload["resume_link"] == CI_ENV["RESUME_LINK"]
+    assert payload["action_run_link"].endswith("/actions/runs/20561457327")
+    assert sent == app.canonicalize(payload)
+    assert transport.request.full_url == app.SUBMISSION_URL
+    assert transport.request.get_header("Content-type") == "application/json"
     assert transport.request.get_method() == "POST"
 
 
 def test_non_ascii_is_literal_utf8_not_escaped():
-    """Non-ASCII stays as UTF-8 bytes rather than \\uXXXX escapes.
-
-    B12's example is pure ASCII, so it passes under either json.dumps setting.
-    This pins the reading of "UTF-8-encoded" that the example cannot decide.
-    """
     body = app.canonicalize({**B12_EXAMPLE_PAYLOAD, "name": "Айдар Камалов"})
     assert "Айдар Камалов".encode("utf-8") in body
     assert b"\\u" not in body
@@ -154,8 +151,6 @@ def test_non_200_response_fails_the_run(capsys):
 
 
 def test_unreachable_endpoint_fails_without_retrying(capsys):
-    """A connection failure is reported once. It is never retried, because the
-    endpoint has no idempotency key and a resend could double-submit."""
     attempts = []
 
     def refusing_transport(request):
@@ -179,4 +174,46 @@ def test_dry_run_posts_nothing_and_hides_the_secret(capsys):
     stdout = capsys.readouterr().out
     assert transport.request is None
     assert "sha256=" in stdout
-    assert B12_SECRET not in stdout
+    assert TEST_SECRET not in stdout
+
+
+@pytest.mark.parametrize("resume_link", [None, "", "   "])
+def test_missing_resume_fails_before_posting(resume_link, capsys):
+    env = dict(CI_ENV)
+    env.pop("RESUME_LINK")
+    if resume_link is not None:
+        env["RESUME_LINK"] = resume_link
+    transport = RecordingTransport()
+    assert app.main([], env=env, transport=transport) == app.EXIT_MISCONFIGURED
+    assert transport.request is None
+    assert "RESUME_LINK" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("body", [
+    b"not json", b"\xff", b"[]", b"null",
+    b'{"success": false, "receipt": "r-123"}',
+    b'{"success": "false", "receipt": "r-123"}',
+    b'{"success": 1, "receipt": "r-123"}',
+    b'{"success": true}',
+    b'{"success": true, "receipt": 123}',
+    b'{"success": true, "receipt": ""}',
+    b'{"success": true, "receipt": "   "}',
+])
+def test_invalid_response_fails_cleanly(body, capsys):
+    transport = RecordingTransport(body=body)
+    assert app.main([], env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    assert "Submission receipt:" not in captured.out
+
+
+def test_timeout_fails_without_retrying(capsys):
+    attempts = []
+
+    def timed_out(request):
+        attempts.append(request)
+        raise TimeoutError("read timed out")
+
+    assert app.main([], env=CI_ENV, transport=timed_out) == app.EXIT_SUBMISSION_FAILED
+    assert len(attempts) == 1
+    assert "read timed out" in capsys.readouterr().err

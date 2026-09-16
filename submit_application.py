@@ -1,7 +1,7 @@
-"""Submit a job application by POSTing a signed, canonicalized JSON payload.
+"""Submit a signed application to B12.
 
-The request body is serialized exactly once. Those same bytes are what gets
-signed and what gets sent, so the signature can never drift from the payload.
+The body is serialized exactly once. Those same bytes are both signed and sent,
+so the signature cannot drift from the payload.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ REQUEST_TIMEOUT_SECONDS = 30
 
 NAME = "Aidar Kamalov"
 EMAIL = "akaudakar@gmail.com"
-RESUME_LINK = ""  # Set before submitting; main() refuses to run while empty.
 
 EXIT_SUBMISSION_FAILED = 1
 EXIT_MISCONFIGURED = 2
@@ -39,13 +38,11 @@ class ConfigurationError(RuntimeError):
 
 
 def canonicalize(payload: Mapping[str, Any]) -> bytes:
-    """Serialize a payload to the exact bytes to sign and send.
+    r"""Serialize to the exact bytes that get signed and sent.
 
-    Keys sorted alphabetically, compact separators, encoded as UTF-8.
-
-    ensure_ascii is False so non-ASCII characters are emitted as literal UTF-8
-    rather than \\uXXXX escapes. B12's published example cannot distinguish the
-    two settings because it contains only ASCII; see the README.
+    ensure_ascii=False emits non-ASCII as literal UTF-8 rather than \uXXXX
+    escapes. B12's example payload is pure ASCII, so their published digest
+    matches under either setting; "UTF-8-encoded" reads as the literal form.
     """
     return json.dumps(
         payload,
@@ -56,30 +53,20 @@ def canonicalize(payload: Mapping[str, Any]) -> bytes:
 
 
 def sign(body: bytes, secret: str) -> str:
-    """Return the X-Signature-256 header value for a raw request body."""
     digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
 
 def utc_timestamp(now: datetime | None = None) -> str:
-    """Return an ISO 8601 UTC timestamp with milliseconds and a trailing Z.
-
-    datetime.isoformat() would give microseconds and a +00:00 offset, so the
-    format is spelled out to match the shape B12's example uses.
-    """
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    milliseconds = moment.microsecond // 1000
-    return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{milliseconds:03d}Z"
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
     value = env.get(name)
-    if not value:
-        raise ConfigurationError(
-            f"{name} is not set. This script derives its links from the CI "
-            f"environment and will not post a payload it had to guess at."
-        )
-    return value
+    if not value or not value.strip():
+        raise ConfigurationError(f"{name} is not set. Set it before submitting.")
+    return value.strip()
 
 
 def repository_link(env: Mapping[str, str]) -> str:
@@ -89,23 +76,16 @@ def repository_link(env: Mapping[str, str]) -> str:
 
 
 def action_run_link(env: Mapping[str, str]) -> str:
-    """Build a link to the run that is executing right now.
-
-    Deriving this rather than pasting it is what makes the link self-referential:
-    the payload always points at the run that posted it.
-    """
     run_id = _required(env, "GITHUB_RUN_ID")
     return f"{repository_link(env)}/actions/runs/{run_id}"
 
 
 def build_payload(env: Mapping[str, str], now: datetime | None = None) -> dict[str, str]:
-    if not RESUME_LINK:
-        raise ConfigurationError("RESUME_LINK is empty. Set it before submitting.")
     return {
         "timestamp": utc_timestamp(now),
         "name": NAME,
         "email": EMAIL,
-        "resume_link": RESUME_LINK,
+        "resume_link": _required(env, "RESUME_LINK"),
         "repository_link": repository_link(env),
         "action_run_link": action_run_link(env),
     }
@@ -118,7 +98,7 @@ def urllib_transport(request: urllib.request.Request) -> tuple[int, bytes]:
     except urllib.error.HTTPError as error:
         # An HTTP error is still a response: the server received the request.
         # Returning it rather than raising keeps that distinct from URLError,
-        # which means the request may never have arrived.
+        # where the request may never have arrived at all.
         return error.code, error.read()
 
 
@@ -131,26 +111,17 @@ def build_request(body: bytes, signature: str) -> urllib.request.Request:
     )
 
 
-def submit(
-    payload: Mapping[str, Any],
-    secret: str,
-    transport: Transport = urllib_transport,
-) -> tuple[int, bytes]:
-    body = canonicalize(payload)
-    return transport(build_request(body, sign(body, secret)))
-
-
 def read_receipt(body: bytes) -> str:
     try:
         parsed = json.loads(body)
-    except json.JSONDecodeError as error:
-        raise ConfigurationError(f"Response was not JSON: {body!r}") from error
-    if not parsed.get("success"):
-        raise ConfigurationError(f"Response did not report success: {parsed!r}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f"Response was not JSON: {body!r}") from error
+    if not isinstance(parsed, dict) or parsed.get("success") is not True:
+        raise ValueError(f"Response did not report success: {parsed!r}")
     receipt = parsed.get("receipt")
-    if not receipt:
-        raise ConfigurationError(f"Response carried no receipt: {parsed!r}")
-    return str(receipt)
+    if not isinstance(receipt, str) or not receipt.strip():
+        raise ValueError(f"Response carried no receipt: {parsed!r}")
+    return receipt
 
 
 def _append_step_summary(text: str, env: Mapping[str, str]) -> None:
@@ -192,11 +163,11 @@ def main(
 
     try:
         status, response_body = transport(build_request(body, signature))
-    except urllib.error.URLError as error:
-        # No HTTP response, so the request may or may not have arrived. This is
-        # deliberately not retried: the endpoint offers no idempotency key, and
-        # a duplicate application is worse than a manual re-run.
-        print(f"error: could not reach {SUBMISSION_URL}: {error.reason}", file=sys.stderr)
+    except (urllib.error.URLError, TimeoutError) as error:
+        # No HTTP response, so a lost request and a lost reply look identical
+        # from here. The endpoint offers no idempotency key, so retrying could
+        # file a second application. Re-run the workflow by hand instead.
+        print(f"error: could not reach {SUBMISSION_URL}: {error}", file=sys.stderr)
         print(f"body was: {body.decode('utf-8')}", file=sys.stderr)
         return EXIT_SUBMISSION_FAILED
 
@@ -209,7 +180,7 @@ def main(
 
     try:
         receipt = read_receipt(response_body)
-    except ConfigurationError as error:
+    except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_SUBMISSION_FAILED
 
