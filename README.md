@@ -21,7 +21,7 @@ python3 -m pip install pytest
 python3 -m pytest -q
 ```
 
-32 tests, no network, no environment setup.
+The tests use no network and need no environment setup.
 
 ## Decisions
 
@@ -69,8 +69,8 @@ would give microseconds and `+00:00`.
 | File | Purpose |
 | --- | --- |
 | `submit_application.py` | Canonicalize, sign, post, report |
-| `test_submit_application.py` | 32 tests, no network |
-| `.github/workflows/tests.yml` | Tests on push, reusable by the submit workflow |
+| `test_submit_application.py` | Tests, no network |
+| `.github/workflows/tests.yml` | Tests on every push, reusable by the submit workflow |
 | `.github/workflows/submit.yml` | Manual submission, runs the tests first |
 
 Exit codes: `0` submitted, `1` submission failed, `2` misconfigured.

@@ -1,8 +1,9 @@
 name: tests
 
+# push already covers branches in this repository, so a pull_request trigger
+# would only run the same suite a second time.
 on:
   push:
-  pull_request:
   workflow_call:
 
 jobs:

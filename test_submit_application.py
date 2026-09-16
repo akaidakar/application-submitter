@@ -217,3 +217,19 @@ def test_timeout_fails_without_retrying(capsys):
     assert app.main([], env=CI_ENV, transport=timed_out) == app.EXIT_SUBMISSION_FAILED
     assert len(attempts) == 1
     assert "read timed out" in capsys.readouterr().err
+
+
+def test_receipt_is_written_to_the_step_summary(tmp_path):
+    summary = tmp_path / "summary.md"
+    env = {**CI_ENV, "GITHUB_STEP_SUMMARY": str(summary)}
+    transport = RecordingTransport(body=b'{"success": true, "receipt": "abc-789"}')
+    assert app.main([], env=env, transport=transport) == 0
+    assert "abc-789" in summary.read_text(encoding="utf-8")
+
+
+def test_failed_submission_writes_no_step_summary(tmp_path):
+    summary = tmp_path / "summary.md"
+    env = {**CI_ENV, "GITHUB_STEP_SUMMARY": str(summary)}
+    transport = RecordingTransport(status=500, body=b"boom")
+    assert app.main([], env=env, transport=transport) == app.EXIT_SUBMISSION_FAILED
+    assert not summary.exists()
