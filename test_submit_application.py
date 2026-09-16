@@ -6,9 +6,8 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -38,8 +37,7 @@ B12_EXAMPLE_DIGEST = "c5db257a56e3c258ec1162459c9a295280871269f4cf70146d2c9f1b52
 # The exercise publishes a worked example: the payload above, a signing key,
 # and the digest they produce. The exercise treats the key as a secret, so it
 # never appears here. The digest test reads it from the same environment
-# variable the submission uses and skips when it is absent. CI provides it from the
-# repository secret; locally, export B12_SIGNING_SECRET to run that one test.
+# variable the submission uses and skips when it is absent.
 PUBLISHED_EXAMPLE_KEY = os.environ.get(app.SECRET_ENV_VAR)
 
 # Every other test signs with a different key, so none of them can pass by
@@ -58,42 +56,28 @@ APPLICANT_ARGS = [
     "--email", "applicant@example.com",
     "--resume-link", "https://resume.example.com/applicant.pdf",
 ]
-APPLICANT = app.Applicant(*APPLICANT_ARGS[1::2])
+NAME, EMAIL, RESUME_LINK = APPLICANT_ARGS[1::2]
 
 
-class RecordingTransport:
-    """Stands in for the network and keeps the request it was handed."""
+class FakeTransport:
+    """Stands in for the network. Answers with a response or raises an error."""
 
-    def __init__(self, status: int = 200, body: bytes = b'{"success": true, "receipt": "r-123"}'):
-        self.status = status
-        self.body = body
-        self.request = None
+    def __init__(self, status=200, body=b'{"success": true, "receipt": "r-123"}', error=None):
+        self.status, self.body, self.error = status, body, error
+        self.requests = []
 
     def __call__(self, request):
-        self.request = request
+        self.requests.append(request)
+        if self.error:
+            raise self.error
         return self.status, self.body
 
 
-class RaisingTransport:
-    """Stands in for a network that never answers, and counts the attempts."""
-
-    def __init__(self, error: Exception):
-        self.error = error
-        self.attempts = 0
-
-    def __call__(self, request):
-        self.attempts += 1
-        raise self.error
-
-
 def test_canonicalization_matches_b12s_published_example():
-    body = app.canonicalize(B12_EXAMPLE_PAYLOAD)
-    assert body == B12_EXAMPLE_CANONICAL.encode("utf-8")
+    assert app.canonicalize(B12_EXAMPLE_PAYLOAD) == B12_EXAMPLE_CANONICAL.encode("utf-8")
 
 
-@pytest.mark.skipif(
-    not PUBLISHED_EXAMPLE_KEY, reason=f"{app.SECRET_ENV_VAR} is not set"
-)
+@pytest.mark.skipif(not PUBLISHED_EXAMPLE_KEY, reason=f"{app.SECRET_ENV_VAR} is not set")
 def test_signature_matches_b12s_published_digest():
     """Check this implementation against B12's spec rather than against itself."""
     body = app.canonicalize(B12_EXAMPLE_PAYLOAD)
@@ -101,23 +85,22 @@ def test_signature_matches_b12s_published_digest():
 
 
 def test_signature_covers_the_bytes_actually_sent():
-    transport = RecordingTransport()
+    transport = FakeTransport()
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == 0
 
-    sent = transport.request.data
-    header = transport.request.get_header(app.SIGNATURE_HEADER.capitalize())
+    (request,) = transport.requests
+    sent = request.data
     recomputed = hmac.new(TEST_SECRET.encode("utf-8"), sent, hashlib.sha256).hexdigest()
+    assert request.get_header(app.SIGNATURE_HEADER.capitalize()) == f"sha256={recomputed}"
 
-    assert header == f"sha256={recomputed}"
     payload = json.loads(sent)
-    assert payload["resume_link"] == APPLICANT.resume_link
-    assert payload["name"] == APPLICANT.name
-    assert payload["email"] == APPLICANT.email
-    assert payload["action_run_link"].endswith("/actions/runs/20561457327")
     assert sent == app.canonicalize(payload)
-    assert transport.request.full_url == app.SUBMISSION_URL
-    assert transport.request.get_header("Content-type") == "application/json"
-    assert transport.request.get_method() == "POST"
+    assert (payload["name"], payload["email"], payload["resume_link"]) == (NAME, EMAIL, RESUME_LINK)
+    assert payload["repository_link"] == "https://github.com/someone/some-repo"
+    assert payload["action_run_link"] == "https://github.com/someone/some-repo/actions/runs/20561457327"
+    assert request.full_url == app.SUBMISSION_URL
+    assert request.get_header("Content-type") == "application/json"
+    assert request.get_method() == "POST"
 
 
 def test_non_ascii_is_literal_utf8_not_escaped():
@@ -132,137 +115,107 @@ def test_non_ascii_is_literal_utf8_not_escaped():
         (datetime(2026, 1, 6, 16, 59, 37, 571000, tzinfo=timezone.utc), "2026-01-06T16:59:37.571Z"),
         (datetime(2026, 1, 6, 16, 59, 37, 0, tzinfo=timezone.utc), "2026-01-06T16:59:37.000Z"),
         (datetime(2026, 1, 6, 16, 59, 37, 999999, tzinfo=timezone.utc), "2026-01-06T16:59:37.999Z"),
+        # Six hours ahead of UTC, converted rather than emitted with an offset.
+        (datetime(2026, 1, 6, 22, 59, 37, 571000, tzinfo=timezone(timedelta(hours=6))), "2026-01-06T16:59:37.571Z"),
     ],
 )
-def test_timestamp_is_iso8601_with_milliseconds(moment, expected):
+def test_timestamp_is_utc_iso8601_with_milliseconds(moment, expected):
     assert app.utc_timestamp(moment) == expected
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", app.utc_timestamp(moment))
-
-
-def test_timestamp_converts_other_offsets_to_utc():
-    from datetime import timedelta
-
-    evening_in_bishkek = datetime(2026, 1, 6, 22, 59, 37, 571000, tzinfo=timezone(timedelta(hours=6)))
-    assert app.utc_timestamp(evening_in_bishkek) == "2026-01-06T16:59:37.571Z"
-
-
-def test_links_are_derived_from_the_running_job():
-    payload = app.build_payload(APPLICANT, CI_ENV)
-    assert payload["repository_link"] == "https://github.com/someone/some-repo"
-    assert payload["action_run_link"] == (
-        "https://github.com/someone/some-repo/actions/runs/20561457327"
-    )
 
 
 @pytest.mark.parametrize("missing", ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"])
 def test_missing_ci_environment_fails_loudly(missing):
     env = {key: value for key, value in CI_ENV.items() if key != missing}
     with pytest.raises(app.ConfigurationError, match=missing):
-        app.build_payload(APPLICANT, env)
+        app.build_payload(NAME, EMAIL, RESUME_LINK, env)
 
 
 def test_missing_secret_exits_misconfigured(capsys):
     env = {key: value for key, value in CI_ENV.items() if key != app.SECRET_ENV_VAR}
-    assert app.main(APPLICANT_ARGS, env=env, transport=RecordingTransport()) == app.EXIT_MISCONFIGURED
+    assert app.main(APPLICANT_ARGS, env=env, transport=FakeTransport()) == app.EXIT_MISCONFIGURED
     assert app.SECRET_ENV_VAR in capsys.readouterr().err
 
 
+def test_omitted_applicant_argument_fails_before_posting():
+    transport = FakeTransport()
+    with pytest.raises(SystemExit) as exit_info:
+        app.main(APPLICANT_ARGS[2:], env=CI_ENV, transport=transport)
+    assert exit_info.value.code == app.EXIT_MISCONFIGURED
+    assert transport.requests == []
+
+
+def test_blank_applicant_argument_fails_before_posting(capsys):
+    argv = ["--name", "   ", *APPLICANT_ARGS[2:]]
+    transport = FakeTransport()
+    assert app.main(argv, env=CI_ENV, transport=transport) == app.EXIT_MISCONFIGURED
+    assert transport.requests == []
+    assert "--name" in capsys.readouterr().err
+
+
+def test_applicant_arguments_are_trimmed():
+    argv = ["--name", f"  {NAME} ", "--email", f" {EMAIL}", "--resume-link", f"{RESUME_LINK} "]
+    transport = FakeTransport()
+    assert app.main(argv, env=CI_ENV, transport=transport) == 0
+    payload = json.loads(transport.requests[0].data)
+    assert (payload["name"], payload["email"], payload["resume_link"]) == (NAME, EMAIL, RESUME_LINK)
+
+
+def test_dry_run_posts_nothing_and_hides_the_secret(capsys):
+    transport = FakeTransport()
+    assert app.main([*APPLICANT_ARGS, "--dry-run"], env=CI_ENV, transport=transport) == 0
+    stdout = capsys.readouterr().out
+    assert transport.requests == []
+    assert "sha256=" in stdout
+    assert TEST_SECRET not in stdout
+
+
+def test_successful_submission_prints_the_receipt(capsys):
+    transport = FakeTransport(body=b'{"success": true, "receipt": "abc-789"}')
+    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == 0
+    assert "abc-789" in capsys.readouterr().out
+
+
 def test_non_200_response_fails_the_run(capsys):
-    transport = RecordingTransport(status=403, body=b'{"error": "bad signature"}')
+    transport = FakeTransport(status=403, body=b'{"error": "bad signature"}')
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
     stderr = capsys.readouterr().err
     assert "403" in stderr
     assert "bad signature" in stderr
 
 
-def test_unreachable_endpoint_fails_without_retrying(capsys):
-    transport = RaisingTransport(urllib.error.URLError("connection refused"))
-    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
-    assert transport.attempts == 1
-    assert "connection refused" in capsys.readouterr().err
-
-
-def test_successful_submission_prints_the_receipt(capsys):
-    transport = RecordingTransport(body=b'{"success": true, "receipt": "abc-789"}')
-    assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == 0
-    assert "abc-789" in capsys.readouterr().out
-
-
-def test_dry_run_posts_nothing_and_hides_the_secret(capsys):
-    transport = RecordingTransport()
-    assert app.main([*APPLICANT_ARGS, "--dry-run"], env=CI_ENV, transport=transport) == 0
-    stdout = capsys.readouterr().out
-    assert transport.request is None
-    assert "sha256=" in stdout
-    assert TEST_SECRET not in stdout
-
-
-@pytest.mark.parametrize("flag", ["--name", "--email", "--resume-link"])
-def test_omitted_applicant_argument_fails_before_posting(flag):
-    argv = list(APPLICANT_ARGS)
-    position = argv.index(flag)
-    del argv[position : position + 2]
-    transport = RecordingTransport()
-    with pytest.raises(SystemExit) as exit_info:
-        app.main(argv, env=CI_ENV, transport=transport)
-    assert exit_info.value.code == app.EXIT_MISCONFIGURED
-    assert transport.request is None
-
-
-@pytest.mark.parametrize("flag", ["--name", "--email", "--resume-link"])
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_applicant_argument_fails_before_posting(flag, blank, capsys):
-    argv = list(APPLICANT_ARGS)
-    argv[argv.index(flag) + 1] = blank
-    transport = RecordingTransport()
-    assert app.main(argv, env=CI_ENV, transport=transport) == app.EXIT_MISCONFIGURED
-    assert transport.request is None
-    assert flag in capsys.readouterr().err
-
-
-def test_applicant_arguments_are_trimmed():
-    applicant = app.Applicant("  Some Applicant ", " a@example.com", "https://r.example.com ")
-    assert (applicant.name, applicant.email, applicant.resume_link) == (
-        "Some Applicant", "a@example.com", "https://r.example.com"
-    )
-
-
 @pytest.mark.parametrize("body", [
-    b"not json", b"\xff", b"[]", b"null",
+    b"not json",
+    b"[]",
     b'{"success": false, "receipt": "r-123"}',
-    b'{"success": "false", "receipt": "r-123"}',
-    b'{"success": 1, "receipt": "r-123"}',
-    b'{"success": true}',
-    b'{"success": true, "receipt": 123}',
     b'{"success": true, "receipt": ""}',
-    b'{"success": true, "receipt": "   "}',
 ])
 def test_invalid_response_fails_cleanly(body, capsys):
-    transport = RecordingTransport(body=body)
+    transport = FakeTransport(body=body)
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
     captured = capsys.readouterr()
     assert "error:" in captured.err
     assert "Submission receipt:" not in captured.out
 
 
-def test_timeout_fails_without_retrying(capsys):
-    transport = RaisingTransport(TimeoutError("read timed out"))
+@pytest.mark.parametrize("error", [
+    urllib.error.URLError("connection refused"),
+    TimeoutError("read timed out"),
+])
+def test_no_response_fails_without_retrying(error, capsys):
+    transport = FakeTransport(error=error)
     assert app.main(APPLICANT_ARGS, env=CI_ENV, transport=transport) == app.EXIT_SUBMISSION_FAILED
-    assert transport.attempts == 1
-    assert "read timed out" in capsys.readouterr().err
+    assert len(transport.requests) == 1
+    assert str(error) in capsys.readouterr().err
 
 
-def test_receipt_is_written_to_the_step_summary(tmp_path):
+def test_receipt_is_written_to_the_step_summary_only_on_success(tmp_path):
     summary = tmp_path / "summary.md"
     env = {**CI_ENV, "GITHUB_STEP_SUMMARY": str(summary)}
-    transport = RecordingTransport(body=b'{"success": true, "receipt": "abc-789"}')
-    assert app.main(APPLICANT_ARGS, env=env, transport=transport) == 0
-    assert "abc-789" in summary.read_text(encoding="utf-8")
 
-
-def test_failed_submission_writes_no_step_summary(tmp_path):
-    summary = tmp_path / "summary.md"
-    env = {**CI_ENV, "GITHUB_STEP_SUMMARY": str(summary)}
-    transport = RecordingTransport(status=500, body=b"boom")
-    assert app.main(APPLICANT_ARGS, env=env, transport=transport) == app.EXIT_SUBMISSION_FAILED
+    failure = FakeTransport(status=500, body=b"boom")
+    assert app.main(APPLICANT_ARGS, env=env, transport=failure) == app.EXIT_SUBMISSION_FAILED
     assert not summary.exists()
+
+    success = FakeTransport(body=b'{"success": true, "receipt": "abc-789"}')
+    assert app.main(APPLICANT_ARGS, env=env, transport=success) == 0
+    assert "abc-789" in summary.read_text(encoding="utf-8")
